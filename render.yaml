@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: ibnr-dashboard
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn dashboard:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT
+    envVars:
+      - key: PORT
+        value: 8050
+    plan: free

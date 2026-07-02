@@ -2,12 +2,16 @@
 Interactive IBNR dashboard.
 
 Run with:
-    python dashboard.py --file path/to/claims.xlsx
+    python dashboard.py
 
 Then open http://127.0.0.1:8050 in a browser.
 
+For Render deployment:
+    - The app will use the PORT environment variable automatically
+    - File upload is available in the UI
+
 Layout:
-    - File/method controls
+    - File upload control
     - Tabs: Triangles | Development Factors | Ultimates & IBNR
     - Triangle heatmap + selectable measure (claims / counts / severity)
     - Development factor line chart across development age
@@ -16,7 +20,9 @@ Layout:
 
 from __future__ import annotations
 
-import argparse
+import os
+import base64
+import io
 
 import dash
 import pandas as pd
@@ -26,20 +32,12 @@ from dash import Input, Output, State, dcc, html, dash_table
 from ibnr.pipeline import run_pipeline
 
 # ---------------------------------------------------------------------------
-# CLI args (so the file path isn't hardcoded, unlike the original notebook)
+# Configuration
 # ---------------------------------------------------------------------------
-parser = argparse.ArgumentParser()
-parser.add_argument("--file", required=True, help="Path to claims Excel file")
-parser.add_argument(
-    "--method",
-    default=None,
-    choices=["simple_average", "volume_weighted", "last_n_average"],
-    help="Development factor selection method (optional - can select in UI)",
-)
-args, _ = parser.parse_known_args()
-
-# Run pipeline without method selection initially
-RESULTS = run_pipeline(args.file, dev_method=None)
+RESULTS = None
+UPLOAD_FOLDER = "uploads"
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
 MEASURE_LABELS = {"claims": "Reported Claims ($)", "counts": "Reported Counts", "severity": "Reported Severity ($)"}
 MEASURE_ORDER = ["claims", "counts", "severity"]
@@ -52,12 +50,37 @@ app.layout = html.Div(
     style={"fontFamily": "Segoe UI, sans-serif", "margin": "20px"},
     children=[
         html.H1("IBNR Chain-Ladder Wizard", style={"marginBottom": "4px"}),
-        html.P(f"Source: {args.file}", style={"color": "#666", "marginBottom": "20px"}),
         
-        # Progress indicator
-        html.Div(id="progress-bar", style={"marginBottom": "20px"}),
+        # File upload section
+        html.Div([
+            html.P("Upload your claims Excel file to begin:", style={"marginBottom": "8px"}),
+            dcc.Upload(
+                id="upload-data",
+                children=html.Div([
+                    "Drag and Drop or ",
+                    html.A("Select File")
+                ]),
+                style={
+                    "width": "100%",
+                    "height": "60px",
+                    "lineHeight": "60px",
+                    "borderWidth": "1px",
+                    "borderStyle": "dashed",
+                    "borderRadius": "5px",
+                    "textAlign": "center",
+                    "margin": "10px 0",
+                    "backgroundColor": "#f8f9fa"
+                },
+                multiple=False,
+                accept=".xlsx,.xls"
+            ),
+            html.Div(id="upload-status", style={"color": "#666", "marginBottom": "20px"}),
+        ]),
         
-        # Step content
+        # Progress indicator (hidden until file uploaded)
+        html.Div(id="progress-bar", style={"marginBottom": "20px", "display": "none"}),
+        
+        # Step content (hidden until file uploaded)
         html.Div(id="step-content", style={"minHeight": "400px", "marginBottom": "20px"}),
         
         # Anchor for scrolling to top
@@ -71,12 +94,13 @@ app.layout = html.Div(
                       style={"padding": "8px 16px", "marginLeft": "8px"}),
             html.Button("Restart", id="restart-btn", n_clicks=0,
                       style={"padding": "8px 16px", "marginLeft": "8px", "backgroundColor": "#28a745", "color": "white", "border": "none"}),
-        ], id="navigation-buttons", style={"marginTop": "20px"}),
+        ], id="navigation-buttons", style={"marginTop": "20px", "display": "none"}),
         
-        # Store for user selections
+        # Store for user selections and file data
         dcc.Store(id="user-selections", data={}),
         dcc.Store(id="current-step", data=0),
-    ],
+        dcc.Store(id="file-data", data=None),
+   ],
 )
 
 
@@ -151,6 +175,48 @@ TOTAL_STEPS = 4
 
 
 @app.callback(
+    Output("file-data", "data"),
+    Output("upload-status", "children"),
+    Output("progress-bar", "style"),
+    Output("navigation-buttons", "style"),
+    Input("upload-data", "contents"),
+    State("upload-data", "filename"),
+)
+def handle_upload(contents, filename):
+    """Handle file upload and process the data."""
+    if contents is None:
+        return None, "No file uploaded yet", {"display": "none"}, {"display": "none"}
+    
+    try:
+        # Parse uploaded file
+        content_type, content_string = contents.split(",")
+        decoded = base64.b64decode(content_string)
+        
+        # Save to file for pipeline processing
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        with open(filepath, "wb") as f:
+            f.write(decoded)
+        
+        # Run pipeline
+        results = run_pipeline(filepath, dev_method=None)
+        
+        # Convert results to JSON-serializable format
+        file_data = {
+            "filename": filename,
+            "triangles": {
+                measure: df.to_dict() for measure, df in results["triangles"].items()
+            },
+            "age_to_age": {
+                measure: df.to_dict() for measure, df in results["age_to_age"].items()
+            }
+        }
+        
+        return file_data, f"File '{filename}' uploaded successfully!", {"display": "block"}, {"display": "block"}
+    except Exception as e:
+        return None, f"Error processing file: {str(e)}", {"display": "none"}, {"display": "none"}
+
+
+@app.callback(
     Output("progress-bar", "children"),
     Output("step-content", "children"),
     Output("prev-btn", "style"),
@@ -158,8 +224,24 @@ TOTAL_STEPS = 4
     Output("restart-btn", "style"),
     Input("current-step", "data"),
     Input("user-selections", "data"),
+    Input("file-data", "data"),
 )
-def render_step(step, selections):
+def render_step(step, selections, file_data):
+    # If no file uploaded, show placeholder
+    if file_data is None:
+        empty_content = html.Div([
+            html.P("Please upload a file to begin.", style={"color": "#666", "fontSize": "16px"})
+        ])
+        return html.Div(), empty_content, {"visibility": "hidden"}, {"visibility": "hidden"}, {"visibility": "hidden"}
+    
+    # Convert file_data back to DataFrames
+    triangles = {
+        measure: pd.DataFrame(data) for measure, data in file_data["triangles"].items()
+    }
+    age_to_age = {
+        measure: pd.DataFrame(data) for measure, data in file_data["age_to_age"].items()
+    }
+    
     # Calculate progress
     progress_pct = (step + 1) / TOTAL_STEPS * 100
     progress_bar = html.Div([
@@ -180,8 +262,8 @@ def render_step(step, selections):
     if step < 3:
         # Pages 0-2: Claims, Counts, Severity (each with all components)
         measure = MEASURE_ORDER[step]
-        ata_df = RESULTS["age_to_age"][measure]
-        tri = RESULTS["triangles"][measure]
+        ata_df = age_to_age[measure]
+        tri = triangles[measure]
         
         # Calculate suggested values
         from ibnr.triangles import development_factors, volume_weighted_development_factors
@@ -245,15 +327,15 @@ def render_step(step, selections):
                 custom_devfacs[measure] = pd.Series(selections[measure])
             else:
                 # Fallback to simple average from age-to-age factors
-                custom_devfacs[measure] = development_factors(RESULTS["age_to_age"][measure], method="simple_average")
+                custom_devfacs[measure] = development_factors(age_to_age[measure], method="simple_average")
         
         # Recalculate ultimates with custom factors
-        ult_claims_chainladder = project_ultimates(RESULTS["triangles"]["claims"], custom_devfacs["claims"], label="Ultimate_Claims")
-        ult_counts = project_ultimates(RESULTS["triangles"]["counts"], custom_devfacs["counts"], label="Ultimate_Counts")
-        ult_severity = project_ultimates(RESULTS["triangles"]["severity"], custom_devfacs["severity"], label="Ultimate_Severity")
+        ult_claims_chainladder = project_ultimates(triangles["claims"], custom_devfacs["claims"], label="Ultimate_Claims")
+        ult_counts = project_ultimates(triangles["counts"], custom_devfacs["counts"], label="Ultimate_Counts")
+        ult_severity = project_ultimates(triangles["severity"], custom_devfacs["severity"], label="Ultimate_Severity")
         ult_claims_freqsev = combine_frequency_severity(ult_counts, ult_severity, scale=1000.0)
         
-        comparison = pd.DataFrame(index=RESULTS["triangles"]["claims"].index)
+        comparison = pd.DataFrame(index=triangles["claims"].index)
         comparison["Latest_Reported_Claims"] = ult_claims_chainladder["Latest_Reported"]
         comparison["Ultimate_ChainLadder"] = ult_claims_chainladder["Ultimate_Claims"]
         comparison["Ultimate_FreqSeverity"] = ult_claims_freqsev["Ultimate_Claims_FreqSev"]
@@ -375,4 +457,5 @@ app.clientside_callback(
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 8050))
+    app.run_server(host="0.0.0.0", port=port, debug=False)

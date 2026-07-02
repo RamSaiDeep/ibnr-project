@@ -76,6 +76,8 @@ ibnr_project/
 
 ## Running it
 
+### Local development
+
 ```bash
 pip install -r requirements.txt
 
@@ -83,9 +85,38 @@ pip install -r requirements.txt
 python -m ibnr.pipeline --file sample_claims.xlsx --method volume_weighted
 
 # Launch the interactive dashboard
-python dashboard.py --file sample_claims.xlsx --method volume_weighted
+python dashboard.py
 # then open http://127.0.0.1:8050
 ```
+
+### Deploy to Render
+
+This application is configured for deployment to Render using the provided `render.yaml` file.
+
+**Prerequisites:**
+- A Render account (free tier available)
+- Git repository with this code
+
+**Deployment steps:**
+
+1. Push your code to a Git repository (GitHub, GitLab, or Bitbucket)
+2. Log in to [Render](https://render.com)
+3. Click "New +" and select "Web Service"
+4. Connect your Git repository
+5. Render will automatically detect the `render.yaml` file and use its configuration
+6. Click "Create Web Service"
+
+The application will:
+- Automatically install dependencies from `requirements.txt`
+- Start the Dash app using Gunicorn
+- Use the PORT environment variable provided by Render
+- Be accessible at your Render service URL
+
+**Alternative manual deployment:**
+If you prefer manual configuration, create a web service with:
+- **Runtime:** Python 3
+- **Build Command:** `pip install -r requirements.txt`
+- **Start Command:** `gunicorn dashboard:app --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:$PORT`
 
 ## Input data format
 
