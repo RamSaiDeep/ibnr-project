@@ -23,6 +23,7 @@ from __future__ import annotations
 import os
 import base64
 import io
+import tempfile
 
 import dash
 import pandas as pd
@@ -35,9 +36,14 @@ from ibnr.pipeline import run_pipeline
 # Configuration
 # ---------------------------------------------------------------------------
 RESULTS = None
-UPLOAD_FOLDER = "uploads"
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+# Use /tmp for Render (read-only filesystem elsewhere)
+UPLOAD_FOLDER = os.environ.get("UPLOAD_FOLDER", tempfile.gettempdir())
+try:
+    if not os.path.exists(UPLOAD_FOLDER):
+        os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+except Exception as e:
+    print(f"Warning: Could not create uploads folder: {e}")
+    UPLOAD_FOLDER = tempfile.gettempdir()
 
 MEASURE_LABELS = {"claims": "Reported Claims ($)", "counts": "Reported Counts", "severity": "Reported Severity ($)"}
 MEASURE_ORDER = ["claims", "counts", "severity"]
@@ -192,13 +198,20 @@ def handle_upload(contents, filename):
         content_type, content_string = contents.split(",")
         decoded = base64.b64decode(content_string)
         
-        # Save to file for pipeline processing
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
-        with open(filepath, "wb") as f:
-            f.write(decoded)
+        # Process file directly from memory (no filesystem needed)
+        df = pd.read_excel(io.BytesIO(decoded))
+        
+        # Save to temp file for pipeline processing
+        import tempfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as tmp:
+            tmp.write(decoded)
+            tmp_path = tmp.name
         
         # Run pipeline
-        results = run_pipeline(filepath, dev_method=None)
+        results = run_pipeline(tmp_path, dev_method=None)
+        
+        # Clean up temp file
+        os.unlink(tmp_path)
         
         # Convert results to JSON-serializable format
         file_data = {
